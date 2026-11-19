@@ -1,0 +1,21 @@
+Media Downloader itself is MIT licensed (see LICENSE). The packaged Windows
+download also contains the following third-party software, which keeps its
+own license:
+
+yt-dlp          https://github.com/yt-dlp/yt-dlp             The Unlicense (public domain)
+Flask           https://flask.palletsprojects.com            BSD-3-Clause
+python-dotenv   https://github.com/theskumar/python-dotenv   BSD-3-Clause
+pywebview       https://github.com/r0x0r/pywebview           BSD-3-Clause
+PyInstaller     https://pyinstaller.org                      GPL-2.0 with a special exception
+                                                             that permits bundling in any program
+Python          https://www.python.org                       PSF License
+Node.js         https://nodejs.org                           MIT (and bundled components)
+FFmpeg/ffprobe  https://ffmpeg.org                           LGPL-2.1+ or GPL-2.0+, depending on
+                                                             the build. The bundled build is from
+                                                             https://www.gyan.dev/ffmpeg/builds/
+                                                             (check which variant you used).
+                                                             Source code and license texts:
+                                                             https://ffmpeg.org/download.html
+
+If you redistribute the Windows package, keep this file and the licenses of
+the bundled programs with it.

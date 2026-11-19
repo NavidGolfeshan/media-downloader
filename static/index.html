@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Downloader</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Media Downloader</h1>
+      <p class="lede">Paste a video or playlist link, choose what to keep. Files are saved straight into your download folder, organised by channel.</p>
+      <div class="toolbar">
+        <button type="button" id="library-btn" class="ghost">Library</button>
+        <button type="button" id="settings-btn" class="ghost">Settings</button>
+      </div>
+      <p id="region" class="muted small" aria-live="polite">Region: checking…</p>
+    </header>
+
+    <form id="inspect-form" class="url-row" autocomplete="off">
+      <input id="url" type="url" inputmode="url" placeholder="https://…" aria-label="Video or playlist URL" required>
+      <button id="inspect-btn" type="submit" class="primary">Look up</button>
+    </form>
+    <p id="inspect-error" class="notice error" role="alert" hidden></p>
+
+    <section id="media-card" class="card" hidden>
+      <div class="card-head">
+        <button type="button" id="back-btn" class="ghost back" hidden>← Back</button>
+        <h2 id="media-title"></h2>
+        <p id="media-sub" class="muted"></p>
+      </div>
+
+      <div id="group-tools" hidden>
+        <h3 id="group-heading">Playlists and sections</h3>
+        <p id="browse-error" class="notice error" role="alert" hidden></p>
+        <ul id="group-list" class="group-list"></ul>
+      </div>
+
+      <div id="playlist-tools" hidden>
+        <div class="tools-row">
+          <button type="button" id="select-all" class="ghost">Select all</button>
+          <button type="button" id="select-none" class="ghost">Clear</button>
+          <input id="filter" type="search" class="filter-input" placeholder="Filter by text, e.g. Audio" aria-label="Show only videos whose title contains this text" autocomplete="off">
+          <form id="range-form" class="range-form" autocomplete="off">
+            <input id="range" type="text" placeholder="Videos, e.g. 1,3,5-10" aria-label="Select videos by number">
+            <button type="submit" class="ghost">Select</button>
+          </form>
+        </div>
+        <p id="filter-note" class="muted small" hidden></p>
+        <p id="range-error" class="notice error" role="alert" hidden></p>
+        <ol id="track-list" class="track-list"></ol>
+      </div>
+      <p id="have-note" class="notice have" hidden></p>
+    </section>
+
+    <section id="options-card" class="card" hidden>
+      <fieldset>
+        <legend>Format</legend>
+        <div class="segmented" id="format-group" role="radiogroup" aria-label="Format">
+          <button type="button" role="radio" data-value="mp3" aria-checked="true">MP3 audio</button>
+          <button type="button" role="radio" data-value="mp4" aria-checked="false">MP4 video</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend id="quality-legend">Audio quality</legend>
+        <div class="segmented" id="quality-group" role="radiogroup" aria-labelledby="quality-legend"></div>
+        <p id="quality-note" class="muted small" hidden></p>
+      </fieldset>
+
+      <fieldset id="subs-fieldset" hidden>
+        <legend>Subtitles</legend>
+        <div class="subs-row">
+          <label class="check"><input type="checkbox" id="subs-check"> Also download subtitles</label>
+          <select id="subs-lang" aria-label="Subtitle language" disabled></select>
+        </div>
+        <p id="subs-note" class="muted small"></p>
+      </fieldset>
+
+      <p id="dest-preview" class="muted small dest"></p>
+
+      <div class="actions">
+        <button id="start-btn" type="button" class="primary">Download</button>
+      </div>
+      <p id="start-error" class="notice error" role="alert" hidden></p>
+    </section>
+
+    <section id="job-card" class="card" hidden aria-live="polite">
+      <div class="card-head">
+        <h2 id="job-title"></h2>
+        <p id="job-message" class="muted"></p>
+      </div>
+      <p id="job-stats" class="job-stats" hidden></p>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="job-bar"><span></span></div>
+      <ol id="job-tracks" class="track-list progress"></ol>
+      <p id="job-error" class="notice error" role="alert" hidden></p>
+      <p id="job-folder" class="job-folder" hidden></p>
+      <ul id="job-files" class="file-list"></ul>
+      <div class="actions">
+        <button id="cancel-btn" type="button" class="ghost" hidden>Cancel</button>
+        <button id="reset-btn" type="button" class="primary" hidden>Start another</button>
+      </div>
+    </section>
+
+    <footer class="muted small">
+      Only download content you own or are allowed to save. Files are saved to <code id="footer-dir">…</code> and stay there until you delete them.
+    </footer>
+  </main>
+
+  <dialog id="dup-dialog" aria-labelledby="dup-title">
+    <form method="dialog">
+      <h2 id="dup-title">You are trying to download some items again</h2>
+      <div id="dup-body" class="dup-body"></div>
+      <div class="dialog-actions">
+        <button value="again" class="primary">Yes, download again</button>
+        <button value="no">No, unselect them</button>
+        <button value="skip" title="Keep them selected and stop asking for this list">Skip this message</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <form id="settings-form" method="dialog">
+      <h2 id="settings-title">Settings</h2>
+      <label class="field">Download folder
+        <input id="set-dir" type="text" autocomplete="off" required>
+        <span class="muted small">Created if it doesn't exist. Use a full path, e.g. D:\Music or /content/drive/MyDrive/media.</span>
+      </label>
+      <label class="field">Proxy
+        <input id="set-proxy" type="text" autocomplete="off" placeholder="none">
+        <span class="muted small">Empty = no proxy. A port like 10808 (SOCKS5 on this computer), host:port, or a URL such as http://127.0.0.1:10809.</span>
+      </label>
+      <label class="field">Browser cookies
+        <input id="set-cookies" type="text" list="browser-list" autocomplete="off" placeholder="none">
+        <datalist id="browser-list">
+          <option value="firefox"></option><option value="chrome"></option><option value="edge"></option>
+          <option value="brave"></option><option value="chromium"></option><option value="opera"></option>
+          <option value="vivaldi"></option>
+        </datalist>
+        <span class="muted small">Lets YouTube see you as signed in (fixes "Sign in to confirm you're not a bot"). Type the browser you are logged in to YouTube with. Firefox is the most reliable; Chrome and Edge often fail because they lock or encrypt their cookies. A specific profile: <code>firefox:PROFILE_NAME</code>. Empty = off.</span>
+      </label>
+      <label class="field">Cookies file (optional)
+        <input id="set-cookie-file" type="text" autocomplete="off" placeholder="none">
+        <span class="muted small">Full path to an exported <code>cookies.txt</code>. If set, it is used instead of the browser.</span>
+      </label>
+      <label class="field">Downloads at the same time
+        <input id="set-jobs" type="number" min="1" max="16" required>
+      </label>
+      <label class="field">Keep finished jobs on screen for (minutes)
+        <input id="set-ttl" type="number" min="1" required>
+        <span class="muted small">Only the list on this page. Downloaded files are never deleted.</span>
+      </label>
+      <p id="settings-error" class="notice error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="submit" class="primary" id="settings-save">Save</button>
+        <button type="button" id="settings-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="library-dialog" aria-labelledby="library-title">
+    <div class="library">
+      <h2 id="library-title">Library</h2>
+      <p id="library-summary" class="muted small"></p>
+      <div id="library-body"></div>
+      <div class="dialog-actions"><button type="button" id="library-close">Close</button></div>
+    </div>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
