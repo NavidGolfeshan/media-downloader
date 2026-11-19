@@ -342,11 +342,59 @@ class DownloaderHelperTests(unittest.TestCase):
             {"_type": "playlist", "webpage_url": "https://www.youtube.com/@c/playlists", "title": "Chan - Playlists"},
             {"_type": "url", "ie_key": "YoutubeTab", "url": "https://www.youtube.com/@c/videos", "title": "dup"},
         ]}
-        with mock.patch.object(downloader, "inspect_url", return_value=info):
+        with mock.patch.object(downloader, "inspect_url", return_value=info), \
+             mock.patch.object(downloader, "probe_tab", return_value=None):
             result = downloader.inspect_media("https://www.youtube.com/@c")
         self.assertEqual(result["items"], [])
         self.assertEqual([g["url"] for g in result["groups"]], [
             "https://www.youtube.com/@c/videos", "https://www.youtube.com/@c/playlists"])
+
+    def test_bare_channel_gets_playlists_and_releases(self):
+        # yt-dlp lists only Videos/Shorts for a bare channel address.
+        info = {"title": "Chan", "entries": [
+            {"url": "abc123XYZ00", "ie_key": "Youtube", "title": "A video", "id": "abc123XYZ00"},
+            {"_type": "url", "ie_key": "YoutubeTab", "url": "https://www.youtube.com/@c/shorts", "title": "Chan - Shorts"},
+        ]}
+        asked = []
+
+        def probe(url, label):
+            asked.append(url)
+            if url.endswith("/releases"):
+                return None  # this channel has no Releases tab
+            return {"url": url, "title": "Chan - " + label}
+
+        with mock.patch.object(downloader, "inspect_url", return_value=info), \
+             mock.patch.object(downloader, "probe_tab", side_effect=probe):
+            result = downloader.inspect_media("https://www.youtube.com/@c/")
+        self.assertEqual(asked, ["https://www.youtube.com/@c/playlists", "https://www.youtube.com/@c/releases"])
+        self.assertEqual([g["url"] for g in result["groups"]], [
+            "https://www.youtube.com/@c/shorts", "https://www.youtube.com/@c/playlists"])
+        self.assertEqual(len(result["items"]), 1)
+
+    def test_channel_with_only_playlists_is_not_empty(self):
+        with mock.patch.object(downloader, "inspect_url", return_value={"title": "Chan", "entries": []}), \
+             mock.patch.object(downloader, "probe_tab",
+                               side_effect=lambda url, label: {"url": url, "title": label}):
+            result = downloader.inspect_media("https://www.youtube.com/channel/UC123")
+        self.assertEqual([g["title"] for g in result["groups"]], ["Playlists", "Releases"])
+
+    def test_tabs_are_not_probed_for_other_addresses(self):
+        info = {"title": "x", "entries": [{"url": "https://a/1", "id": "1"}]}
+        with mock.patch.object(downloader, "inspect_url", return_value=info), \
+             mock.patch.object(downloader, "probe_tab") as probe:
+            for url in ("https://www.youtube.com/@c/videos", "https://www.youtube.com/@c/playlists",
+                        "https://www.youtube.com/playlist?list=PL1", "https://vimeo.com/user1"):
+                downloader.inspect_media(url)
+        probe.assert_not_called()
+
+    def test_probe_tab_handles_missing_tab(self):
+        class Boom:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def extract_info(self, *a, **k): raise RuntimeError("This channel does not have a releases tab")
+        with mock.patch.object(downloader.yt_dlp, "YoutubeDL", Boom):
+            self.assertIsNone(downloader.probe_tab("https://www.youtube.com/@c/releases", "Releases"))
 
     def test_inspect_media_playlists_tab_and_mixed(self):
         info = {"title": "Playlists", "entries": [

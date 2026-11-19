@@ -204,6 +204,44 @@ def _duration(value: Any) -> int | None:
     return seconds if seconds > 0 else None
 
 
+# A bare channel address (no /videos, /shorts, ... on the end).
+BARE_CHANNEL_PATTERN = re.compile(
+    r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+))/?$",
+    re.IGNORECASE,
+)
+# yt-dlp lists only Videos, Shorts and Live for a bare channel address, so these
+# two tabs have to be looked for separately.
+EXTRA_CHANNEL_TABS = (("playlists", "Playlists"), ("releases", "Releases"))
+
+
+def probe_tab(url: str, label: str) -> dict[str, str] | None:
+    """Return {"url", "title"} if the channel tab at `url` exists and has something in it."""
+    options = common_options()
+    options.update({"extract_flat": "in_playlist", "playlist_items": "1"})
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        entries = [entry for entry in (info or {}).get("entries") or [] if entry]
+    except Exception:  # noqa: BLE001 - a missing tab is normal, not an error
+        return None
+    if not entries:
+        return None
+    return {"url": url, "title": str((info or {}).get("title") or label)}
+
+
+def extra_channel_groups(url: str) -> list[dict[str, str]]:
+    """The Playlists / Releases tabs of a channel, when the address is a bare channel."""
+    match = BARE_CHANNEL_PATTERN.match(url.strip())
+    if not match:
+        return []
+    groups = []
+    for tab, label in EXTRA_CHANNEL_TABS:
+        group = probe_tab(f"{match.group(1)}/{tab}", label)
+        if group:
+            groups.append(group)
+    return groups
+
+
 def inspect_media(url: str, channel_hint: str | None = None) -> dict[str, Any]:
     """Inspect a URL and return a UI-friendly description.
 
@@ -253,6 +291,11 @@ def inspect_media(url: str, channel_hint: str | None = None) -> dict[str, Any]:
             "id": str(entry.get("id") or "") or None,
             "duration": _duration(entry.get("duration")),
         })
+
+    for group in extra_channel_groups(url):
+        if group["url"] not in seen_groups:
+            seen_groups.add(group["url"])
+            groups.append(group)
 
     if settings.max_playlist_items > 0:
         items = items[:settings.max_playlist_items]
