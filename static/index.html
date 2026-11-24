@@ -52,6 +52,7 @@
         <ol id="track-list" class="track-list"></ol>
       </div>
       <p id="have-note" class="notice have" hidden></p>
+      <p id="fail-note" class="notice error" hidden></p>
     </section>
 
     <section id="options-card" class="card" hidden>
@@ -84,6 +85,17 @@
         <button id="start-btn" type="button" class="primary">Download</button>
       </div>
       <p id="start-error" class="notice error" role="alert" hidden></p>
+
+      <fieldset id="subonly-fieldset" class="subonly" hidden>
+        <legend>Subtitles only</legend>
+        <p id="subonly-intro" class="muted small"></p>
+        <div class="subs-row">
+          <select id="subonly-lang" aria-label="Subtitle language" disabled></select>
+          <button id="subonly-btn" type="button" class="ghost" disabled>Download subtitles only</button>
+        </div>
+        <p id="subonly-note" class="muted small"></p>
+        <p id="subonly-error" class="notice error" role="alert" hidden></p>
+      </fieldset>
     </section>
 
     <section id="job-card" class="card" hidden aria-live="polite">
@@ -96,15 +108,18 @@
       <ol id="job-tracks" class="track-list progress"></ol>
       <p id="job-error" class="notice error" role="alert" hidden></p>
       <p id="job-folder" class="job-folder" hidden></p>
+      <p id="job-log" class="job-folder muted small" hidden></p>
       <ul id="job-files" class="file-list"></ul>
       <div class="actions">
         <button id="cancel-btn" type="button" class="ghost" hidden>Cancel</button>
-        <button id="reset-btn" type="button" class="primary" hidden>Start another</button>
+        <button id="back-list-btn" type="button" class="primary" hidden>← Back to the list</button>
+        <button id="reset-btn" type="button" class="ghost" hidden>New link</button>
       </div>
     </section>
 
     <footer class="muted small">
-      Only download content you own or are allowed to save. Files are saved to <code id="footer-dir">…</code> and stay there until you delete them.
+      Only download content you own or are allowed to save. Files are saved to <code id="footer-dir">…</code> and stay there until you delete them.<br>
+      Items that failed are listed in <code id="footer-failed">…</code>; the full text of every error is kept in <code id="footer-log">…</code>.
     </footer>
   </main>
 

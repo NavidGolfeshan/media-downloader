@@ -10,6 +10,10 @@
   --ok: #17794d;
   --bad: #b3322f;
   --bad-soft: #fbe4e3;
+  --music: #17794d;
+  --music-soft: #dcf3e6;
+  --video: #9a4d00;
+  --video-soft: #fde9cf;
   --radius: 10px;
   color-scheme: light;
 }
@@ -27,6 +31,10 @@
     --ok: #52c58b;
     --bad: #ff8d89;
     --bad-soft: #3a1f1f;
+    --music: #52c58b;
+    --music-soft: #163a29;
+    --video: #ffb454;
+    --video-soft: #3b2a10;
     color-scheme: dark;
   }
 }
@@ -183,8 +191,16 @@ code { font-size: 0.9em; word-break: break-all; }
 
 .notice.have { background: var(--accent-soft); color: var(--ink); white-space: pre-wrap; }
 .track-list .have { display: block; font-size: 0.8rem; margin-top: 2px; color: var(--muted); }
-.track-list .have.same { color: var(--bad); font-weight: 600; }
-.track-list .have.quality, .track-list .have.format { color: var(--accent); }
+.track-list .have.same .lead { color: var(--bad); font-weight: 600; }
+.track-list .have.quality .lead, .track-list .have.format .lead { color: var(--accent); }
+/* one tag per version we have: music and video look different on purpose */
+.chip { display: inline-block; margin: 0 0 0 6px; padding: 1px 9px; border-radius: 999px; border: 1px solid transparent;
+  font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
+.chip.music { background: var(--music-soft); color: var(--music); }
+.chip.video { background: var(--video-soft); color: var(--video); }
+.chip.match { border-color: currentColor; }
+.notice.have .lead { font-weight: 600; }
+.notice.have .paths { margin-top: 6px; color: var(--muted); font-size: 0.85rem; }
 .track-list .name-col { flex: 1; min-width: 0; }
 .track-list .name-col .name { display: block; }
 
@@ -227,3 +243,9 @@ input[type="number"] {
 #library-body { max-height: 56vh; overflow-y: auto; }
 
 .track-list .dur { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 0.875rem; }
+
+/* items that failed before */
+.track-list .fail { display: block; font-size: 0.8rem; margin-top: 2px; color: var(--bad); font-weight: 600; }
+.subonly { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 18px; margin-bottom: 0; }
+.subonly legend { padding: 0; }
+.subonly select { max-width: 100%; }

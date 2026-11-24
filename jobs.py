@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 import downloader
+import errorlog
+import failures
 import library
+import playlist
 from formatting import format_size
 from library import safe_name as safe_filename  # noqa: F401  (kept for older imports)
 
@@ -44,6 +47,10 @@ class Job:
         root: Path,
         destination: Path,
         subtitle: dict[str, Any] | None,
+        source_url: str | None = None,
+        channel: str | None = None,
+        section: list[str] | None = None,
+        playlist_items: list[dict[str, Any]] | None = None,
     ) -> None:
         self.id = job_id
         self.title = title
@@ -53,6 +60,12 @@ class Job:
         self.root = root
         self.destination = destination
         self.subtitle = subtitle
+        self.source_url = source_url  # the page that was looked up, so the person can go back to it
+        self.channel = channel
+        self.section = section or []
+        self.playlist_items = playlist_items  # the whole playlist (not just what was selected)
+        self.playlist_file: str | None = None
+        self.had_failures = False     # something was written to the error log
         self.created = time.time()
         self.finished_at: float | None = None
 
@@ -87,6 +100,12 @@ class Job:
                 "quality": self.quality,
                 "folder": str(self.destination),
                 "subtitle": (self.subtitle or {}).get("lang"),
+                "source_url": self.source_url,
+                "channel": self.channel,
+                "playlist_file": self.playlist_file,
+                "error_log": str(errorlog.log_path(self.root)) if self.had_failures else None,
+                "failed_file": (str(failures.file_path(self.root))
+                                if self.had_failures and self.mode != "subs" else None),
                 "state": self.state,
                 "message": self.message,
                 "error": self.error,
@@ -145,12 +164,32 @@ class JobManager:
         channel: str = "downloads",
         section: list[str] | None = None,
         subtitle: dict[str, Any] | None = None,
+        source_url: str | None = None,
+        playlist_items: list[dict[str, Any]] | None = None,
     ) -> Job:
         self.cleanup_expired()
         root = self.root
-        destination = library.destination(root, channel, section or ["videos"])
+        section = section or ["videos"]
+        destination = library.destination(root, channel, section, library.kind_for(mode))
         job = Job(uuid.uuid4().hex[:12], title, is_playlist, items, mode, quality,
-                  root, destination, subtitle)
+                  root, destination, subtitle, source_url, channel, section, playlist_items)
+        return self._submit(job)
+
+    def create_subtitles(
+        self,
+        title: str,
+        items: list[dict[str, str]],
+        subtitle: dict[str, Any],
+        channel: str | None = None,
+        source_url: str | None = None,
+    ) -> Job:
+        """A job that downloads only subtitles, for videos already in the library."""
+        self.cleanup_expired()
+        job = Job(uuid.uuid4().hex[:12], title, len(items) > 1, items, "subs",
+                  str(subtitle["lang"]), self.root, self.root, subtitle, source_url, channel)
+        return self._submit(job)
+
+    def _submit(self, job: Job) -> Job:
         with self._lock:
             self._jobs[job.id] = job
         self._executor.submit(self._run, job)
@@ -207,6 +246,9 @@ class JobManager:
         except Exception as exc:  # noqa: BLE001 - report any failure to the UI
             logger.exception("Job %s failed", job.id)
             job.error = str(exc)[:900]
+            job.had_failures = True
+            errorlog.write(job.root, "Job failed", exc,
+                           {"Job": job.title, "Format": library.describe(job.mode, job.quality)}, exc)
             self._finish(job, "failed", "The job failed.")
 
     def _finish(self, job: Job, state: str, message: str) -> None:
@@ -223,8 +265,12 @@ class JobManager:
                         track["status"] = "cancelled"
 
     def _download_all(self, job: Job) -> None:
+        if job.mode == "subs":
+            self._subtitles_all(job)
+            return
         total = len(job.tracks)
         saved = 0
+        fmt = library.describe(library.kind_for(job.mode), library.quality_label(job.mode, job.quality))
 
         for index, track in enumerate(job.tracks):
             if job.cancel_event.is_set():
@@ -262,7 +308,12 @@ class JobManager:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to download %s: %s", track["title"], exc)
                 shutil.rmtree(staging, ignore_errors=True)
+                # The whole error goes to the log; the page gets a shortened copy.
+                failures.note_failure(
+                    job.root, job.destination, id=track.get("id"), title=track["title"],
+                    url=track["url"], error=exc, fmt=fmt, exc=exc)
                 with job.lock:
+                    job.had_failures = True
                     track["status"] = "failed"
                     track["error"] = str(exc)[:600]
                     track["speed"] = track["eta"] = None
@@ -270,6 +321,7 @@ class JobManager:
                 continue
 
             final = next(p for p in placed if p.suffix.lower() in library.MEDIA_EXTS)
+            failures.note_success(job.root, id=track.get("id"), url=track["url"])
             with job.lock:
                 track["status"] = "done"
                 track["percent"] = 100.0
@@ -289,8 +341,87 @@ class JobManager:
             self._finish(job, "failed", "No files downloaded successfully.")
             return
 
+        self._write_playlist(job)
         failed = sum(1 for t in job.tracks if t["status"] == "failed")
         size = sum(f["size"] for f in job.files)
         summary = f"Saved {saved} file{'s' if saved != 1 else ''} ({format_size(size)})"
+        summary += f", {failed} failed." if failed else "."
+        self._finish(job, "done", summary)
+
+    def _write_playlist(self, job: Job) -> None:
+        """Save 'Playlist name.m3u8' next to the tracks of a playlist (see playlist.py)."""
+        if not job.playlist_items or job.section[:1] != ["playlists"] or not job.destination.is_dir():
+            return
+        try:
+            path = playlist.write(job.destination, job.title, job.source_url, job.playlist_items)
+        except Exception as exc:  # noqa: BLE001 - the tracks are saved; this file is a bonus
+            logger.warning("Could not write the playlist file: %s", exc)
+            errorlog.write(job.root, "Could not write the playlist file", exc,
+                           {"Playlist": job.title, "Folder": str(job.destination)}, exc)
+            return
+        if path is not None:
+            with job.lock:
+                job.playlist_file = str(path)
+
+    def _subtitles_all(self, job: Job) -> None:
+        """Download just the subtitles and save them next to the videos already in the library."""
+        total = len(job.tracks)
+        saved = 0
+        lang = str(job.subtitle["lang"])
+        index = library.scan(job.root)
+
+        for position, track in enumerate(job.tracks):
+            if job.cancel_event.is_set():
+                raise downloader.Cancelled()
+            with job.lock:
+                track["status"] = "downloading"
+                job.message = f"Subtitles {position + 1}/{total}: {track['title'][:120]}"
+
+            videos = library.video_files(index, track.get("id") or "", job.root)
+            staging = staging_dir(job.root, track["url"], "subs", lang, job.subtitle)
+            try:
+                if not videos:
+                    raise RuntimeError(
+                        "This video isn't in the library, so there is no video file to put the subtitles next to.")
+                downloader.download_subtitles(
+                    track["url"], str(staging), job.subtitle, cancel_event=job.cancel_event)
+                placed = library.place_subtitles(staging, videos, track.get("id"))
+            except downloader.Cancelled:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to get subtitles for %s: %s", track["title"], exc)
+                shutil.rmtree(staging, ignore_errors=True)
+                # The video itself is fine, so this is logged but not added to failed.json.
+                failures.note_failure(
+                    job.root, job.root, id=track.get("id"), title=track["title"], url=track["url"],
+                    error=exc, fmt=f"subtitles [{lang}]", exc=exc,
+                    what="Subtitle download failed", remember=False)
+                with job.lock:
+                    job.had_failures = True
+                    track["status"] = "failed"
+                    track["error"] = str(exc)[:600]
+                    job.percent = (position + 1) / total * 100.0
+                continue
+
+            with job.lock:
+                track["status"] = "done"
+                track["percent"] = 100.0
+                track["subtitles"] = len(placed)
+                for path in placed:
+                    job.files.append({"name": path.name, "size": path.stat().st_size})
+                job.percent = (position + 1) / total * 100.0
+            saved += 1
+
+        if not saved:
+            first_errors = [t["error"] for t in job.tracks if t.get("error")][:3]
+            job.error = "No subtitles were downloaded."
+            if first_errors:
+                job.error += "\n\n" + "\n".join(first_errors)
+            self._finish(job, "failed", "No subtitles downloaded.")
+            return
+
+        failed = sum(1 for t in job.tracks if t["status"] == "failed")
+        summary = f"Saved subtitles for {saved} video{'s' if saved != 1 else ''}"
         summary += f", {failed} failed." if failed else "."
         self._finish(job, "done", summary)

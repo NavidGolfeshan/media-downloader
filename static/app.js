@@ -12,6 +12,10 @@ const state = {
   formatCache: new Map(),     // url -> {heights, subtitles}
   config: {},                 // download_dir, proxy, ... from the server
   found: new Map(),           // item id -> versions already in the download folder
+  failed: new Map(),          // item id -> {error, format, failed_at} for items that failed before
+  subOnly: { url: null },     // the video whose subtitle languages are listed in the "subtitles only" box
+  subRequest: 0,
+  lastJob: null,              // the latest job snapshot (to know where to go back to)
   acknowledged: new Set(),    // "id|mode|quality" the person agreed to download again
   skipPrompts: false,         // "Skip this message" pressed for the current list
   formatRequest: 0,
@@ -118,6 +122,9 @@ function trackDetail(track) {
     const subs = track.subtitles ? ` · +${plural(track.subtitles, "subtitle")}` : "";
     return `${STATUS_TEXT.done} · ${formatSize(track.size)}${subs}`;
   }
+  if (track.status === "done" && track.subtitles) {
+    return `${STATUS_TEXT.done} · ${plural(track.subtitles, "subtitle file")}`;
+  }
   return STATUS_TEXT[track.status] || track.status;
 }
 
@@ -125,6 +132,11 @@ function setRadio(group, value) {
   for (const button of group.querySelectorAll("[role=radio]")) {
     button.setAttribute("aria-checked", String(button.dataset.value === value));
   }
+}
+
+function truncate(text, max) {
+  const value = String(text || "");
+  return value.length > max ? value.slice(0, max - 1) + "…" : value;
 }
 
 function plural(count, word) {
@@ -154,10 +166,10 @@ function classify(item) {
   if (!records.length) return null;
   const kind = KIND[state.mode];
   const same = records.filter((r) => r.kind === kind && digitsOf(r.quality) === state.quality);
-  if (same.length) return { category: "same", have: same };
+  if (same.length) return { category: "same", have: same, all: records };
   const sameKind = records.filter((r) => r.kind === kind);
-  if (sameKind.length) return { category: "quality", have: sameKind };
-  return { category: "format", have: records };
+  if (sameKind.length) return { category: "quality", have: sameKind, all: records };
+  return { category: "format", have: records, all: records };
 }
 
 function fullPath(record) {
@@ -166,39 +178,90 @@ function fullPath(record) {
 
 async function refreshFound() {
   const ids = (state.media?.items || []).map((i) => i.id).filter(Boolean);
-  if (!ids.length) { state.found = new Map(); renderBadges(); return; }
+  if (!ids.length) { state.found = new Map(); state.failed = new Map(); renderBadges(); return; }
   try {
     const data = await api("/api/check", { method: "POST", body: { ids } });
     state.found = new Map(Object.entries(data.found));
+    state.failed = new Map(Object.entries(data.failed || {}));
   } catch (err) {
     state.found = new Map();
+    state.failed = new Map();
   }
   renderBadges();
 }
+
+const KIND_ICON = { music: "♪", video: "▶" };
 
 function haveText(info) {
   const labels = [...new Set(info.have.map((r) => r.label))].map((l) => `'${l}'`).join(", ");
   return info.category === "same" ? `Already downloaded: ${labels}` : `You have: ${labels}`;
 }
 
+/* One coloured tag per version we have: green "♪ music 192kbps", orange "▶ video 720p".
+   The ones that match what is selected now (same format and quality) get an outline. */
+function haveNodes(info) {
+  const nodes = [el("span", { class: "lead", text: info.category === "same" ? "Already downloaded:" : "You have:" })];
+  const shown = new Set();
+  for (const record of info.all) {
+    if (shown.has(record.label)) continue;
+    shown.add(record.label);
+    const match = info.have.some((r) => r.label === record.label);
+    nodes.push(el("span", {
+      class: `chip ${record.kind}${match ? " match" : ""}`,
+      text: `${KIND_ICON[record.kind] || ""} ${record.label}`.trim(),
+    }));
+  }
+  return nodes;
+}
+
+function failedInfo(item) {
+  return (item && item.id && state.failed.get(item.id)) || null;
+}
+
+function failText(info) {
+  const what = info.format ? ` (${info.format})` : "";
+  return `Failed before${what}: ${truncate(info.error, 140)}`;
+}
+
+function failTitle(info) {
+  const lines = [info.error, `Listed in ${state.config.failed_file || "failed.json"}`];
+  if (state.config.error_log) lines.push(`Full details: ${state.config.error_log}`);
+  return lines.join("\n");
+}
+
 function renderBadges() {
   if (!state.media) return;
   state.media.items.forEach((item, index) => {
     const badge = document.querySelector(`#track-list [data-have="${index}"]`);
-    if (!badge) return;
-    const info = classify(item);
-    badge.hidden = !info;
-    badge.className = `have ${info ? info.category : ""}`;
-    badge.textContent = info ? haveText(info) : "";
-    badge.title = info ? info.have.map(fullPath).join("\n") : "";
+    if (badge) {
+      const info = classify(item);
+      badge.hidden = !info;
+      badge.className = `have ${info ? info.category : ""}`;
+      badge.replaceChildren(...(info ? haveNodes(info) : []));
+      badge.title = info ? info.all.map(fullPath).join("\n") : "";
+    }
+    const failBadge = document.querySelector(`#track-list [data-fail="${index}"]`);
+    if (failBadge) {
+      const failure = failedInfo(item);
+      failBadge.hidden = !failure;
+      failBadge.textContent = failure ? failText(failure) : "";
+      failBadge.title = failure ? failTitle(failure) : "";
+    }
   });
 
   const note = $("have-note");
   const single = !state.media.is_playlist ? classify(state.media.items[0]) : null;
   note.hidden = !single;
   if (single) {
-    note.textContent = `${haveText(single)}\n${single.have.map(fullPath).join("\n")}`;
+    note.replaceChildren(...haveNodes(single), el("div", { class: "paths", text: single.all.map(fullPath).join("\n") }));
   }
+
+  const failNote = $("fail-note");
+  const singleFail = !state.media.is_playlist ? failedInfo(state.media.items[0]) : null;
+  failNote.hidden = !singleFail;
+  if (singleFail) failNote.textContent = `${failText(singleFail)}\n${failTitle(singleFail)}`;
+
+  renderSubOnly();
 }
 
 function renderDest() {
@@ -288,14 +351,17 @@ $("inspect-form").addEventListener("submit", async (event) => {
   }
 });
 
-function loadMedia(media) {
+function loadMedia(media, { keepOptions = false } = {}) {
   state.media = media;
   const items = media.items || [];
   const groups = media.groups || [];
   state.selected = new Set(media.is_playlist ? [] : [0]);
-  state.mode = "mp3";
-  state.quality = "192";
+  if (!keepOptions) {
+    state.mode = "mp3";
+    state.quality = "192";
+  }
   state.found = new Map();
+  state.failed = new Map();
   state.acknowledged = new Set();
   state.skipPrompts = false;
 
@@ -390,6 +456,7 @@ function renderTrackPicker() {
       el("span", { class: "name-col" }, [
         el("span", { class: "name", text: item.title }),
         el("span", { class: "have", "data-have": String(index), hidden: "" }),
+        el("span", { class: "fail", "data-fail": String(index), hidden: "" }),
       ]),
       el("span", { class: "dur", text: formatDuration(item.duration) }),
     ])));
@@ -441,6 +508,7 @@ function syncCheckboxes() {
 function onSelectionChanged() {
   applyFilter();
   updateStartButton();
+  renderSubOnly();
   if (state.mode === "mp4") renderQuality();
 }
 
@@ -621,6 +689,99 @@ function updateStartButton() {
   }
 }
 
+/* ---------- subtitles only (for videos that are already downloaded) ---------- */
+
+function hasVideo(item) {
+  const records = (item && item.id && state.found.get(item.id)) || [];
+  return records.some((r) => r.kind === "video");
+}
+
+function drawSubOnlyLanguages(list, message) {
+  const select = $("subonly-lang");
+  const previous = select.value;
+  select.replaceChildren();
+  const usable = Array.isArray(list) && list.length > 0;
+  for (const track of usable ? list : []) {
+    const option = el("option", { value: track.lang, text: `${track.name} [${track.lang}]` });
+    option.dataset.auto = track.auto ? "1" : "0";
+    select.append(option);
+  }
+  if (usable && list.some((t) => t.lang === previous)) select.value = previous;
+  select.hidden = !usable;
+  select.disabled = !usable;
+  $("subonly-btn").disabled = !usable;
+  $("subonly-note").textContent = usable
+    ? "The languages are those of the first selected video; a video without that language is reported as failed. Files are named after the video, e.g. Title [id][720p].en.srt."
+    : (message || (list === null ? "Subtitles couldn't be checked." : "This video has no subtitles to download."));
+}
+
+async function renderSubOnly() {
+  const fieldset = $("subonly-fieldset");
+  if (!state.media) { fieldset.hidden = true; return; }
+  const picked = [...state.selected].map((i) => state.media.items[i]).filter(Boolean);
+  const eligible = picked.filter(hasVideo);
+  fieldset.hidden = eligible.length === 0;
+  if (!eligible.length) return;
+
+  const skipped = picked.length - eligible.length;
+  $("subonly-intro").textContent =
+    `${plural(eligible.length, "selected video")} already downloaded. Get only the subtitles and save them next to the video files.` +
+    (skipped ? ` ${plural(skipped, "selected item")} without a downloaded video will be skipped.` : "");
+
+  const url = eligible[0].url;
+  if (state.subOnly.url === url) return;  // languages for this video are already listed
+  state.subOnly = { url };
+  const request = ++state.subRequest;
+  drawSubOnlyLanguages(undefined, "Checking which subtitles exist…");
+  let formats = state.formatCache.get(url);
+  if (!formats) {
+    try {
+      formats = await api(`/api/formats?url=${encodeURIComponent(url)}`);
+      state.formatCache.set(url, formats);
+    } catch (err) {
+      if (request !== state.subRequest) return;
+      state.subOnly = { url: null };  // let the next selection try again
+      drawSubOnlyLanguages(null, err.message);
+      return;
+    }
+  }
+  if (request !== state.subRequest) return;
+  drawSubOnlyLanguages(formats.subtitles);
+}
+
+$("subonly-btn").addEventListener("click", async () => {
+  showError("subonly-error", "");
+  const items = [...state.selected].map((i) => state.media.items[i]).filter(hasVideo);
+  const option = $("subonly-lang").selectedOptions[0];
+  if (!items.length || !option) return;
+  $("subonly-btn").disabled = true;
+  try {
+    const job = await api("/api/subtitles", {
+      method: "POST",
+      body: {
+        title: state.media.title,
+        items,
+        subtitle: { lang: option.value, auto: option.dataset.auto === "1" },
+        channel: state.media.channel,
+        source_url: state.media.source_url,
+      },
+    });
+    trackJob(job.id);
+  } catch (err) {
+    showError("subonly-error", err.message);
+  } finally {
+    $("subonly-btn").disabled = false;
+  }
+});
+
+/* A real playlist (not a channel's Videos or Shorts tab): send all of it, so the playlist file
+   records what the playlist was, not only the tracks selected now. */
+function playlistForFile() {
+  const media = state.media;
+  if (!media || !media.is_playlist || (media.section || [])[0] !== "playlists") return undefined;
+  return media.items.map(({ id, title, url, duration, uploader }) => ({ id, title, url, duration, uploader }));
+}
+
 /* ---------- start job ---------- */
 
 $("start-btn").addEventListener("click", async () => {
@@ -652,6 +813,8 @@ $("start-btn").addEventListener("click", async () => {
         quality: state.quality,
         channel: state.media.channel,
         section: state.media.section,
+        source_url: state.media.source_url,
+        playlist: playlistForFile(),
         subtitle: chosenSubtitle(),
       },
     });
@@ -706,6 +869,7 @@ const STATUS_TEXT = {
 
 function renderJob(job) {
   const finished = ["done", "failed", "cancelled"].includes(job.state);
+  state.lastJob = job;
 
   $("job-title").textContent = job.title;
   $("job-message").textContent = job.message;
@@ -740,7 +904,15 @@ function renderJob(job) {
   showError("job-error", job.error);
 
   $("job-folder").hidden = false;
-  $("job-folder").textContent = `${finished ? "Saved to" : "Saving to"}: ${job.folder}`;
+  $("job-folder").textContent = job.mode === "subs"
+    ? `${finished ? "Saved" : "Saving"} next to the videos, inside: ${job.folder}`
+    : `${finished ? "Saved to" : "Saving to"}: ${job.folder}`;
+  const logLine = [];
+  if (job.playlist_file) logLine.push(`Playlist file: ${job.playlist_file}`);
+  if (job.failed_file) logLine.push(`Failed items are listed in: ${job.failed_file}`);
+  if (job.error_log) logLine.push(`Full error details: ${job.error_log}`);
+  $("job-log").textContent = logLine.join("\n");
+  $("job-log").hidden = logLine.length === 0;
   $("job-files").replaceChildren(...job.files.map((file) => el("li", {}, [
     el("span", { text: file.name }),
     el("span", { class: "size", text: formatSize(file.size) }),
@@ -748,6 +920,7 @@ function renderJob(job) {
 
   $("cancel-btn").hidden = finished;
   $("reset-btn").hidden = !finished;
+  $("back-list-btn").hidden = !(finished && (state.media || job.source_url));
 
 }
 
@@ -768,7 +941,37 @@ function forgetJob() {
   try { localStorage.removeItem("mediaDownloaderJob"); } catch (err) { /* ignore */ }
 }
 
+/* Back to where the person was (the playlist or channel section they picked from). */
+$("back-list-btn").addEventListener("click", async () => {
+  const job = state.lastJob;
+  $("back-list-btn").disabled = true;
+  try { await api(`/api/jobs/${state.jobId}`, { method: "DELETE" }); } catch (err) { /* already gone */ }
+  forgetJob();
+  try {
+    if (state.media) {
+      loadMedia(state.media, { keepOptions: true });  // fresh "downloaded / failed" tags, nothing selected
+      return;
+    }
+    if (job && job.source_url) {  // the page was reloaded: look the same address up again
+      const media = await api("/api/inspect", {
+        method: "POST", body: { url: job.source_url, channel: job.channel || undefined },
+      });
+      state.stack = [];
+      loadMedia(media);
+      return;
+    }
+    resetToStart();
+  } catch (err) {
+    resetToStart();
+    showError("inspect-error", err.message);
+  } finally {
+    $("back-list-btn").disabled = false;
+  }
+});
+
 function resetToStart() {
+  state.media = null;
+  state.stack = [];
   clearInterval(state.pollTimer);
   $("job-card").hidden = true;
   $("media-card").hidden = true;
@@ -782,6 +985,8 @@ function resetToStart() {
 function showConfig(config) {
   state.config = config;
   $("footer-dir").textContent = config.download_dir;
+  $("footer-failed").textContent = config.failed_file || "failed.json";
+  $("footer-log").textContent = config.error_log || "errors.log";
   renderDest();
 }
 

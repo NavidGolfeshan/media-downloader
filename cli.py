@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any
 
 import downloader
+import failures as failures_store
 import library
+import playlist
 from config import _browser_cookies, _proxy, settings
 from formatting import format_duration, format_eta, format_size, format_speed
 from jobs import safe_filename, staging_dir
@@ -168,6 +170,7 @@ def download_items(items: list[dict[str, str]], mode: str, quality: str,
     total = len(items)
     have = library.lookup(root, [i["id"] for i in items if i.get("id")])
     kind = library.kind_for(mode)
+    fmt = library.describe(kind, library.quality_label(mode, quality))
 
     for index, item in enumerate(items, 1):
         prefix = f"[{index}/{total}]"
@@ -204,11 +207,14 @@ def download_items(items: list[dict[str, str]], mode: str, quality: str,
         except Exception as exc:  # noqa: BLE001
             progress.clear()
             shutil.rmtree(staging, ignore_errors=True)
+            failures_store.note_failure(
+                root, dest, id=item.get("id"), title=title, url=item["url"], error=exc, fmt=fmt, exc=exc)
             failures.append((title, str(exc)))
             print(f"{prefix} FAILED  {truncate(title, 70)}\n         {str(exc)[:500]}")
             continue
 
         progress.clear()
+        failures_store.note_success(root, id=item.get("id"), url=item["url"])
         elapsed = max(time.monotonic() - started, 0.001)
         got = int(last.get("downloaded") or 0)
         network_bytes += got
@@ -334,7 +340,8 @@ def main(argv: list[str] | None = None) -> int:
             if not items:
                 continue
 
-            dest = library.destination(root, media["channel"], media["section"])
+            dest = library.destination(root, media["channel"], media["section"],
+                                       library.kind_for(args.format))
             dest.mkdir(parents=True, exist_ok=True)
             print(f"\nDownloading {len(items)} item(s) as {args.format.upper()} "
                   f"({quality}{' kbps' if args.format == 'mp3' else 'p max'}) "
@@ -351,6 +358,15 @@ def main(argv: list[str] | None = None) -> int:
                     shutil.rmtree(staging_dir(root, item["url"], args.format, quality, subtitle),
                                   ignore_errors=True)
                 files = [archive]
+
+            if media["is_playlist"] and media["section"][:1] == ["playlists"] and not zip_it:
+                try:
+                    playlist_file = playlist.write(dest, media["title"], url, media["items"])
+                except Exception as exc:  # noqa: BLE001 - the tracks are saved; this file is a bonus
+                    print(f"  Could not write the playlist file: {exc}", file=sys.stderr)
+                    playlist_file = None
+                if playlist_file:
+                    print(f"\nPlaylist file: {playlist_file}")
 
             elapsed = max(time.monotonic() - began, 0.001)
             saved = sum(path.stat().st_size for path in files)

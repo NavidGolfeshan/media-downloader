@@ -82,7 +82,7 @@ class AppTests(unittest.TestCase):
     def test_files_land_in_library_layout_without_track_folders(self):
         data = self.wait(self.create().get_json()["id"])
         self.assertEqual(data["state"], "done")
-        folder = self.root / "Chan" / "videos"
+        folder = self.root / "Chan" / "videos" / "music"   # MP3 goes in music, MP4 in video
         self.assertEqual(data["folder"], str(folder))
         self.assertEqual(sorted(p.name for p in folder.iterdir()),
                          ["Song a [a][192kbps].mp3", "Song b [b][192kbps].mp3"])
@@ -93,7 +93,7 @@ class AppTests(unittest.TestCase):
     def test_video_folder_and_subtitles(self):
         data = self.wait(self.create(mode="mp4", quality="720", section=["playlists", "Best of"],
                                      subtitle={"lang": "en", "auto": False}).get_json()["id"])
-        folder = self.root / "Chan" / "playlists" / "Best of"
+        folder = self.root / "Chan" / "playlists" / "Best of" / "video"
         self.assertEqual(sorted(p.name for p in folder.iterdir()),
                          ["Song a [a][720p].en.srt", "Song a [a][720p].mp4",
                           "Song b [b][720p].en.srt", "Song b [b][720p].mp4"])
@@ -110,18 +110,18 @@ class AppTests(unittest.TestCase):
         self.assertEqual(list(found), ["a"])
         self.assertEqual(found["a"][0]["kind"], "music")
         self.assertEqual(found["a"][0]["quality"], "192kbps")
-        self.assertEqual(found["a"][0]["rel"], "Chan/videos/Song a [a][192kbps].mp3")
+        self.assertEqual(found["a"][0]["rel"], "Chan/videos/music/Song a [a][192kbps].mp3")
 
     def test_redownload_replaces_instead_of_duplicating(self):
         self.wait(self.create().get_json()["id"])
         self.wait(self.create().get_json()["id"])
-        folder = self.root / "Chan" / "videos"
+        folder = self.root / "Chan" / "videos" / "music"
         self.assertEqual(len(list(folder.iterdir())), 2)
 
     def test_other_quality_sits_next_to_it(self):
         self.wait(self.create().get_json()["id"])
         self.wait(self.create(quality="320").get_json()["id"])
-        names = sorted(p.name for p in (self.root / "Chan" / "videos").iterdir())
+        names = sorted(p.name for p in (self.root / "Chan" / "videos" / "music").iterdir())
         self.assertEqual(names, ["Song a [a][192kbps].mp3", "Song a [a][320kbps].mp3",
                                  "Song b [b][192kbps].mp3", "Song b [b][320kbps].mp3"])
         found = self.client.post("/api/check", json={"ids": ["a"]}).get_json()["found"]["a"]
@@ -131,7 +131,7 @@ class AppTests(unittest.TestCase):
         self.wait(self.create().get_json()["id"])
         lib = self.client.get("/api/library").get_json()
         self.assertEqual(lib["count"], 2)
-        self.assertEqual(lib["folders"][0]["folder"], "Chan/videos")
+        self.assertEqual(lib["folders"][0]["folder"], "Chan/videos/music")
 
     def test_partial_failure_still_done(self):
         items = [{"url": "https://x/a", "title": "A", "id": "a"},
@@ -152,6 +152,227 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.create(mode="mp4", quality="abc").status_code, 400)
         self.assertEqual(self.create(items=[]).status_code, 400)
         self.assertEqual(self.create(items=[{"url": "file:///etc/passwd"}]).status_code, 400)
+
+    # ---- failed items, full errors, subtitles only ----------------------------
+
+    def failed_entries(self):
+        import json
+        import failures
+        path = failures.file_path(self.root)
+        if not path.exists():
+            return []
+        return [e for v in json.loads(path.read_text(encoding="utf-8"))["folders"].values() for e in v]
+
+    def test_failed_item_is_remembered_once_and_reported_by_check(self):
+        items = [{"url": "https://x/a", "title": "A", "id": "a"},
+                 {"url": "https://x/bad", "title": "Bad one", "id": "bad"}]
+        self.wait(self.create(items=items).get_json()["id"])
+        self.wait(self.create(items=items).get_json()["id"])  # fails again: must not be written twice
+        self.assertEqual([e["id"] for e in self.failed_entries()], ["bad"])
+        check = self.client.post("/api/check", json={"ids": ["a", "bad"]}).get_json()
+        self.assertEqual(list(check["found"]), ["a"])
+        self.assertEqual(list(check["failed"]), ["bad"])
+        self.assertEqual(check["failed"]["bad"]["error"], "boom")
+        self.assertEqual(check["failed"]["bad"]["format"], "music 192kbps")
+        self.assertEqual(check["failed"]["bad"]["folder"], "Chan/videos/music")
+
+    def test_full_error_is_in_the_log_and_job_points_to_it(self):
+        def long_error(url, output_dir, mode, quality, **kwargs):
+            raise RuntimeError("short reason\n" + "x" * 3000)
+        items = [{"url": "https://x/bad", "title": "Bad one", "id": "bad"}]
+        with mock.patch.object(downloader, "download_one", long_error):
+            data = self.wait(self.create(items=items, is_playlist=False).get_json()["id"])
+        self.assertLessEqual(len(data["tracks"][0]["error"]), 600)  # the page gets a short copy
+        import errorlog
+        log = errorlog.log_path(self.root).read_text(encoding="utf-8")
+        self.assertIn("x" * 3000, log)                              # the log gets everything
+        self.assertIn("Title: Bad one", log)
+        self.assertEqual(data["error_log"], str(errorlog.log_path(self.root)))
+        self.assertTrue(data["failed_file"].endswith("failed.json"))
+
+    def test_success_clears_an_old_failure(self):
+        items = [{"url": "https://x/maybe", "title": "Maybe", "id": "maybe"}]
+        with mock.patch.object(downloader, "download_one",
+                               lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blocked"))):
+            self.wait(self.create(items=items).get_json()["id"])
+        self.assertEqual([e["id"] for e in self.failed_entries()], ["maybe"])
+        self.wait(self.create(items=items).get_json()["id"])  # works this time
+        self.assertEqual(self.failed_entries(), [])
+
+    def test_config_tells_the_page_where_the_files_are(self):
+        data = self.client.get("/api/config").get_json()
+        self.assertTrue(data["error_log"].endswith("errors.log"))
+        self.assertTrue(data["failed_file"].endswith("failed.json"))
+
+    def test_job_remembers_where_it_came_from(self):
+        data = self.wait(self.create(source_url="https://x/playlist?list=1").get_json()["id"])
+        self.assertEqual(data["source_url"], "https://x/playlist?list=1")
+        self.assertEqual(data["channel"], "Chan")
+
+    def test_inspect_returns_the_address_and_logs_failures(self):
+        media = {"is_playlist": False, "title": "T", "channel": "C", "section": ["videos"], "items": []}
+        with mock.patch.object(downloader, "inspect_media", return_value=media):
+            data = self.client.post("/api/inspect", json={"url": "https://x/v"}).get_json()
+        self.assertEqual(data["source_url"], "https://x/v")
+        with mock.patch.object(downloader, "inspect_media", side_effect=RuntimeError("nope " * 400)):
+            self.assertEqual(self.client.post("/api/inspect", json={"url": "https://x/v"}).status_code, 502)
+        import errorlog
+        self.assertIn("Look-up failed", errorlog.log_path(self.root).read_text(encoding="utf-8"))
+
+    def make_videos(self):
+        """Two videos (a, b) downloaded as mp4 720p."""
+        self.wait(self.create(mode="mp4", quality="720").get_json()["id"])
+
+    def subtitles(self, **overrides):
+        body = {"title": "My list", "subtitle": {"lang": "en", "auto": False},
+                "items": [{"url": "https://x/a", "title": "A", "id": "a"},
+                          {"url": "https://x/b", "title": "B", "id": "b"}]}
+        body.update(overrides)
+        return self.client.post("/api/subtitles", json=body)
+
+    def fake_subtitles(self, url, output_dir, subtitle, cancel_event=None):
+        folder = Path(output_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        vid = url.rsplit("/", 1)[-1]
+        if vid == "b" and subtitle["lang"] == "fr":
+            raise RuntimeError("This video has no subtitles in the language 'fr'.")
+        path = folder / f"Song {vid} [{vid}].{subtitle['lang']}.srt"
+        path.write_text("1\n")
+        return [path]
+
+    def test_subtitles_only_go_next_to_the_downloaded_videos(self):
+        self.make_videos()
+        with mock.patch.object(downloader, "download_subtitles", self.fake_subtitles):
+            job = self.subtitles()
+            self.assertEqual(job.status_code, 201)
+            data = self.wait(job.get_json()["id"])
+        self.assertEqual(data["state"], "done")
+        self.assertEqual(data["mode"], "subs")
+        self.assertEqual(sorted(f["name"] for f in data["files"]),
+                         ["Song a [a][720p].en.srt", "Song b [b][720p].en.srt"])
+        folder = self.root / "Chan" / "videos" / "video"
+        self.assertTrue((folder / "Song a [a][720p].en.srt").exists())
+        self.assertTrue((folder / "Song a [a][720p].mp4").exists())  # the video itself is untouched
+        self.assertIsNone(data["failed_file"])
+
+    def test_a_missing_language_fails_only_that_video_and_is_not_listed_as_failed(self):
+        self.make_videos()
+        with mock.patch.object(downloader, "download_subtitles", self.fake_subtitles):
+            data = self.wait(self.subtitles(subtitle={"lang": "fr"}).get_json()["id"])
+        self.assertEqual([t["status"] for t in data["tracks"]], ["done", "failed"])
+        self.assertEqual(data["state"], "done")
+        self.assertEqual(self.failed_entries(), [])
+        import errorlog
+        self.assertIn("Subtitle download failed", errorlog.log_path(self.root).read_text(encoding="utf-8"))
+
+    def test_subtitles_need_a_downloaded_video(self):
+        with mock.patch.object(downloader, "download_subtitles", self.fake_subtitles):
+            data = self.wait(self.subtitles().get_json()["id"])
+        self.assertEqual(data["state"], "failed")
+        self.assertIn("isn't in the library", data["tracks"][0]["error"])
+
+    def test_music_alone_does_not_count_as_a_video(self):
+        self.wait(self.create().get_json()["id"])  # mp3 only
+        with mock.patch.object(downloader, "download_subtitles", self.fake_subtitles):
+            data = self.wait(self.subtitles().get_json()["id"])
+        self.assertEqual(data["state"], "failed")
+
+    def test_subtitle_job_validation(self):
+        self.assertEqual(self.subtitles(subtitle={}).status_code, 400)
+        self.assertEqual(self.subtitles(subtitle={"lang": " "}).status_code, 400)
+        self.assertEqual(self.subtitles(items=[]).status_code, 400)
+        self.assertEqual(self.subtitles(items=[{"url": "https://x/a", "title": "A"}]).status_code, 400)  # no id
+        self.assertEqual(self.subtitles(items=[{"url": "file:///etc/passwd", "id": "a"}]).status_code, 400)
+
+    # ---- music / video folders and playlist files -----------------------------
+
+    PLAYLIST = [
+        {"id": "a", "title": "Song A", "url": "https://x/a", "duration": 100, "uploader": "Artist One"},
+        {"id": "b", "title": "Song B", "url": "https://x/b", "uploader": "Artist Two"},
+        {"id": "z", "title": "Song Z", "url": "https://x/z"},
+    ]
+
+    def test_mp3_and_mp4_of_the_same_item_live_in_different_folders(self):
+        self.wait(self.create().get_json()["id"])
+        self.wait(self.create(mode="mp4", quality="720").get_json()["id"])
+        base = self.root / "Chan" / "videos"
+        self.assertEqual(sorted(p.name for p in (base / "music").iterdir()),
+                         ["Song a [a][192kbps].mp3", "Song b [b][192kbps].mp3"])
+        self.assertEqual(sorted(p.name for p in (base / "video").iterdir()),
+                         ["Song a [a][720p].mp4", "Song b [b][720p].mp4"])
+        found = self.client.post("/api/check", json={"ids": ["a"]}).get_json()["found"]["a"]
+        self.assertEqual(sorted((r["kind"], r["label"]) for r in found),
+                         [("music", "music 192kbps"), ("video", "video 720p")])
+        # downloading one again only replaces its own version
+        self.wait(self.create().get_json()["id"])
+        self.assertEqual(len(list((base / "music").iterdir())), 2)
+        self.assertEqual(len(list((base / "video").iterdir())), 2)
+
+    def test_shorts_and_playlists_get_the_same_split(self):
+        self.wait(self.create(section=["shorts"]).get_json()["id"])
+        self.wait(self.create(mode="mp4", quality="720", section=["shorts"]).get_json()["id"])
+        self.assertTrue((self.root / "Chan" / "shorts" / "music" / "Song a [a][192kbps].mp3").exists())
+        self.assertTrue((self.root / "Chan" / "shorts" / "video" / "Song a [a][720p].mp4").exists())
+
+    def test_playlist_file_is_written_next_to_the_tracks(self):
+        data = self.wait(self.create(
+            title="Road Trip", section=["playlists", "Road Trip"], playlist=self.PLAYLIST,
+            source_url="https://www.youtube.com/playlist?list=PL9").get_json()["id"])
+        folder = self.root / "Chan" / "playlists" / "Road Trip" / "music"
+        self.assertEqual(data["playlist_file"], str(folder / "Road Trip.m3u8"))
+        lines = (folder / "Road Trip.m3u8").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[:3], ["#EXTM3U", "#PLAYLIST:Road Trip", "# Source: https://www.youtube.com/playlist?list=PL9"])
+        self.assertIn("# 3 items in the playlist, 2 in this folder", lines)
+        self.assertIn("#EXTINF:100,Artist One - Song A", lines)
+        self.assertIn("Song a [a][192kbps].mp3", lines)
+        self.assertIn("# Not in this folder: Song Z | https://x/z", lines)  # known, just not downloaded
+
+    def test_each_format_gets_its_own_playlist_file(self):
+        kwargs = dict(title="Road Trip", section=["playlists", "Road Trip"], playlist=self.PLAYLIST)
+        self.wait(self.create(**kwargs).get_json()["id"])
+        self.wait(self.create(mode="mp4", quality="720", **kwargs).get_json()["id"])
+        base = self.root / "Chan" / "playlists" / "Road Trip"
+        self.assertIn("Song a [a][192kbps].mp3", (base / "music" / "Road Trip.m3u8").read_text(encoding="utf-8"))
+        self.assertIn("Song a [a][720p].mp4", (base / "video" / "Road Trip.m3u8").read_text(encoding="utf-8"))
+
+    def test_playlist_file_grows_when_the_rest_is_downloaded_later(self):
+        kwargs = dict(title="Road Trip", section=["playlists", "Road Trip"], playlist=self.PLAYLIST)
+        self.wait(self.create(items=self.PLAYLIST[:1], **kwargs).get_json()["id"])
+        self.wait(self.create(items=self.PLAYLIST[1:2], **kwargs).get_json()["id"])
+        text = (self.root / "Chan" / "playlists" / "Road Trip" / "music" / "Road Trip.m3u8").read_text(encoding="utf-8")
+        self.assertIn("# 3 items in the playlist, 2 in this folder", text)
+
+    def test_no_playlist_file_for_a_channel_tab_or_without_the_playlist(self):
+        self.wait(self.create(playlist=self.PLAYLIST).get_json()["id"])                      # Videos tab
+        self.wait(self.create(section=["playlists", "No list"]).get_json()["id"])             # nothing sent
+        self.assertEqual(list(self.root.rglob("*.m3u8")), [])
+
+    def test_bad_playlist_data_does_not_break_the_download(self):
+        data = self.wait(self.create(section=["playlists", "P"], playlist="nonsense").get_json()["id"])
+        self.assertEqual(data["state"], "done")
+        data = self.wait(self.create(section=["playlists", "P"], playlist=[1, None, "x", {"id": 5}]).get_json()["id"])
+        self.assertEqual(data["state"], "done")
+
+    def test_a_failed_download_is_still_part_of_the_playlist_file(self):
+        bad = [{"id": "bad", "title": "Blocked", "url": "https://x/bad"}] + self.PLAYLIST[:1]
+        self.wait(self.create(title="P", section=["playlists", "P"], playlist=bad, items=bad).get_json()["id"])
+        text = (self.root / "Chan" / "playlists" / "P" / "music" / "P.m3u8").read_text(encoding="utf-8")
+        self.assertIn("# Not in this folder: Blocked | https://x/bad", text)
+        self.assertIn("Song a [a][192kbps].mp3", text)
+
+    def test_inspect_keeps_who_uploaded_each_item(self):
+        info = {"title": "Mix", "channel": "Owner", "entries": [
+            {"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "ie_key": "Youtube", "id": "aaaaaaaaaaa",
+             "title": "One", "uploader": "Artist One"},
+            {"url": "https://www.youtube.com/watch?v=bbbbbbbbbbb", "ie_key": "Youtube", "id": "bbbbbbbbbbb",
+             "title": "Two", "channel": "Artist Two"},
+            {"url": "https://www.youtube.com/watch?v=ccccccccccc", "ie_key": "Youtube", "id": "ccccccccccc",
+             "title": "Three"},
+        ]}
+        with mock.patch.object(downloader, "inspect_url", return_value=info), \
+             mock.patch.object(downloader, "probe_tab", return_value=None):
+            result = downloader.inspect_media("https://www.youtube.com/playlist?list=PL1")
+        self.assertEqual([i.get("uploader") for i in result["items"]], ["Artist One", "Artist Two", None])
 
     def test_hostile_folder_names_stay_inside_library(self):
         data = self.wait(self.create(channel="../../evil", section=["..", "a/b"]).get_json()["id"])

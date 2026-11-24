@@ -21,13 +21,22 @@ class LibraryTests(unittest.TestCase):
         return path
 
     def test_destination_layout(self):
-        self.assertEqual(library.destination(self.root, "ExampleChannel", ["videos"]),
-                         self.root / "ExampleChannel" / "videos")
-        self.assertEqual(library.destination(self.root, "ExampleChannel", ["playlists", "Best of"]),
-                         self.root / "ExampleChannel" / "playlists" / "Best of")
+        self.assertEqual(library.destination(self.root, "ExampleChannel", ["videos"], "music"),
+                         self.root / "ExampleChannel" / "videos" / "music")
+        self.assertEqual(library.destination(self.root, "ExampleChannel", ["videos"], "video"),
+                         self.root / "ExampleChannel" / "videos" / "video")
+        self.assertEqual(library.destination(self.root, "ExampleChannel", ["playlists", "Best of"], "music"),
+                         self.root / "ExampleChannel" / "playlists" / "Best of" / "music")
+        self.assertEqual(library.destination(self.root, "ExampleChannel", ["shorts"], "video"),
+                         self.root / "ExampleChannel" / "shorts" / "video")
+
+    def test_only_music_and_video_folders_exist(self):
+        for kind in ("mp3", "", "../x", "Music"):
+            with self.assertRaises(ValueError):
+                library.destination(self.root, "C", ["videos"], kind)
 
     def test_names_cannot_escape_the_library(self):
-        dest = library.destination(self.root, "../..", ["..", "a/b", "c:d"])
+        dest = library.destination(self.root, "../..", ["..", "a/b", "c:d"], "music")
         self.assertTrue(dest.resolve().is_relative_to(self.root.resolve()))
 
     def test_media_id(self):

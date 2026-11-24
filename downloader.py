@@ -285,12 +285,16 @@ def inspect_media(url: str, channel_hint: str | None = None) -> dict[str, Any]:
         entry_url = normalize_entry_url(entry)
         if not entry_url:
             continue
-        items.append({
+        item = {
             "url": entry_url,
             "title": str(entry.get("title") or "Untitled"),
             "id": str(entry.get("id") or "") or None,
             "duration": _duration(entry.get("duration")),
-        })
+        }
+        uploader = str(entry.get("uploader") or entry.get("channel") or "").strip()
+        if uploader:
+            item["uploader"] = uploader  # playlists can mix artists; the playlist file shows who is who
+        items.append(item)
 
     for group in extra_channel_groups(url):
         if group["url"] not in seen_groups:
@@ -544,3 +548,42 @@ def download_one(
     if not candidates:
         raise RuntimeError("Download completed but no output media file was found.")
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def download_subtitles(
+    url: str,
+    output_dir: str,
+    subtitle: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> list[Path]:
+    """Download only the subtitle of one video, as .srt files in output_dir.
+
+    Raises RuntimeError when the video has no subtitle in that language."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled()
+    folder = Path(output_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    options = common_options()
+    options.update({
+        "noplaylist": True,
+        "ignoreerrors": False,
+        "skip_download": True,
+        "overwrites": True,
+        "windowsfilenames": True,
+        "outtmpl": str(folder / "%(title).160B [%(id)s].%(ext)s"),
+    })
+    options.update(subtitle_options(subtitle))
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.extract_info(url, download=True)
+    except DownloadCancelled as exc:
+        raise Cancelled() from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(explain_error(str(exc))) from exc
+
+    files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".srt")
+    if not files:
+        raise RuntimeError(
+            f"This video has no subtitles in the language '{subtitle['lang']}'.")
+    return files

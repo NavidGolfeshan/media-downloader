@@ -11,10 +11,12 @@ Grab `MediaDownloader-windows.zip` from the [Releases](../../releases) page, unz
 ## Features
 
 - Browser UI: look up a URL, choose options, watch progress, and the files land in your download folder. There is no temporary storage and no timer that deletes anything.
-- **Organised library**: every file goes to `CHANNEL/SECTION/`, with the id and quality at the end of the name, for example
-  `ExampleChannel/videos/Some Video [abc123XYZ00][480p].mp4` or `ExampleChannel/playlists/My Mix/Some Track [def456UVW11][192kbps].mp3`.
+- **Organised library**: every file goes to `CHANNEL/SECTION/music/` (MP3) or `CHANNEL/SECTION/video/` (MP4), so the music and the video version of the same thing never share a folder. The id and quality are at the end of the name, for example
+  `ExampleChannel/videos/video/Some Video [abc123XYZ00][480p].mp4` or `ExampleChannel/playlists/My Mix/music/Some Track [def456UVW11][192kbps].mp3`.
+  Files downloaded with an earlier version stay where they are; they are still recognised as downloaded.
   The channel name is the `@handle` from the URL. Subtitles sit beside the video with the same name (`... [480p].en.srt`).
-- **Already downloaded?** Each item in a list shows a badge when you already have it, with the folder it is in (hover for the full path). Select all / a range such as `1-10` / Download then asks before downloading things again:
+- **Playlist file**: when you download from a playlist (for example one that mixes many artists), a standard `Playlist name.m3u8` is saved in the same `music/` or `video/` folder as the tracks, so you can tell what the playlist was. It lists the whole playlist in order as `Artist - Title`, with the playlist's link at the top. Tracks in the folder are normal entries (open it in VLC or any player); tracks not downloaded, or that failed, are comment lines with their link. It is rewritten after each run, so downloading the rest later completes the same file. Channel tabs such as Videos or Shorts do not get one.
+- **Already downloaded?** Each item in a list shows one coloured tag per version you already have, with the folder it is in (hover for the full path): a green **♪ music 192kbps** and an orange **▶ video 720p**, so the two can't be mixed up. The tag that matches what you have selected now is outlined. Select all / a range such as `1-10` / Download then asks before downloading things again:
   - *same quality*: "you are trying to download some items again";
   - *different quality*: "...you have the 'video 720p' version of this";
   - *different format* (music vs video): "...you have the 'music 192kbps' version of this".
@@ -31,6 +33,30 @@ Grab `MediaDownloader-windows.zip` from the [Releases](../../releases) page, unz
 - MP3 quality: 128, 192 or 320 kbps. MP4 maximum resolution, based on what the first selected video offers.
 - Per-track progress, a Cancel button, and failed tracks reported without stopping the rest.
 - A running job survives a browser refresh (the page reconnects to it).
+- **Back to the list**: when a download finishes, "Back to the list" returns to the playlist or channel section you picked from (same list, nothing typed again, your format and quality kept, selection cleared) with the "downloaded" and "failed" tags refreshed. After a page reload it looks the same address up again. "New link" starts from an empty page instead.
+- **Failed items**: an item that fails is marked in red ("Failed before ...") every time you look the list up again, and is written to `failed.json` (see below). Downloading it successfully later removes the mark.
+- **Full errors**: the page shows a short version of an error; the complete text (everything yt-dlp said, plus the Python traceback) is appended to `errors.log` with the time, title, URL and format.
+- **Subtitles only**: select videos you already downloaded and a "Subtitles only" box appears. Pick a language and only the subtitle is fetched, saved as `.srt` next to each downloaded video file (`Title [id][720p].en.srt`). A video without that language is reported as failed in that job; it is not added to `failed.json`, because the video itself is fine.
+
+### Where the failure records are kept
+
+Both files live in a hidden-style folder inside your download folder, `.media-downloader/` (its path is shown at the bottom of the page and in the job card). It is not part of the library listing.
+
+`failed.json` follows the library's folder layout. An item is written only once (matched by its id, or by its URL when it has no id), whatever format or playlist it failed in:
+
+```json
+{
+  "version": 1,
+  "folders": {
+    "ExampleChannel/playlists/My Mix/music": [
+      {"id": "def456UVW11", "title": "Some Track", "url": "https://...",
+       "error": "short reason", "format": "music 192kbps", "failed_at": "2026-11-19T15:02:11"}
+    ]
+  }
+}
+```
+
+`errors.log` keeps every failure (also repeated ones), and rolls over to `errors.log.1` after about 2 MB. The terminal mode (`cli.py`) writes to the same two files.
 - Optional cookie-file support for sites where you are legitimately signed in.
 
 ## Project files
@@ -111,7 +137,7 @@ While it runs you get one live line per item: percentage, bytes done / total, sp
 | `-f mp3\|mp4` | Format (default `mp3`). |
 | `-q` | MP3: 128 / 192 / 320 kbps. MP4: maximum height such as 720. |
 | `-s SEL` | Playlist items: `all` or numbers/ranges like `1,3,5-10`. Without it, a real terminal asks; otherwise everything is downloaded. |
-| `-o DIR` | Download folder (default: the one saved from the web UI, else `DOWNLOAD_DIR`). Files go in `CHANNEL/SECTION/` named like `Title [id][480p].mp4`, exactly like the UI. |
+| `-o DIR` | Download folder (default: the one saved from the web UI, else `DOWNLOAD_DIR`). Files go in `CHANNEL/SECTION/music/` or `.../video/`, named like `Title [id][480p].mp4`, exactly like the UI; playlists also get their `.m3u8`. |
 | `--again` | Download even if the same format and quality are already in the library (otherwise they are skipped, and other versions are mentioned). |
 | `--subs LANG` / `--auto-subs` | MP4: also save subtitles in that language as `.srt` (`--auto-subs` for auto-generated ones). |
 | `--zip` | Bundle a playlist into one ZIP instead of keeping the separate files. |

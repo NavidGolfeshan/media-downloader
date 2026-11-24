@@ -32,6 +32,14 @@ def fake_download_one(url, output_dir, mode, quality, on_progress=None, cancel_e
     return path
 
 
+def fake_download_one_ok(url, output_dir, mode, quality, on_progress=None, cancel_event=None, subtitle=None):
+    folder = Path(output_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"ok [{url.rsplit('/', 1)[-1]}].{mode}"
+    path.write_bytes(b"x")
+    return path
+
+
 PLAYLIST = {"is_playlist": True, "title": "My List", "groups": [], "channel": "Chan",
             "section": ["videos"], "items": [
     {"url": "https://x/a", "title": "A", "id": "a", "duration": 65},
@@ -60,7 +68,7 @@ class CliTests(unittest.TestCase):
     def test_downloads_selection_and_reports_speed_and_size(self):
         code, text = self.run_cli("https://p", "-s", "1,3")
         self.assertEqual(code, 0)
-        folder = self.out / "Chan" / "videos"
+        folder = self.out / "Chan" / "videos" / "music"
         self.assertEqual(sorted(p.name for p in folder.iterdir()), ["a [a][192kbps].mp3", "c [c][192kbps].mp3"])
         self.assertIn("1 KB", text)  # file size shown
         self.assertIn("250 B/s", text)                       # speed shown while downloading
@@ -82,7 +90,43 @@ class CliTests(unittest.TestCase):
             code, text = self.run_cli("https://p", "-s", "all")
         self.assertEqual(code, 1)
         self.assertIn("FAILED", text)
-        self.assertTrue((self.out / "Chan" / "videos" / "a [a][192kbps].mp3").exists())
+        self.assertTrue((self.out / "Chan" / "videos" / "music" / "a [a][192kbps].mp3").exists())
+
+    def test_failures_are_remembered_once_and_cleared_on_success(self):
+        import json
+        import failures
+        bad = dict(PLAYLIST, items=[{"url": "https://x/bad", "title": "B", "id": "bad"}])
+        with mock.patch.object(downloader, "inspect_media", return_value=bad):
+            self.run_cli("https://p", "-s", "all")
+            self.run_cli("https://p", "-s", "all")  # fails again: still one record
+        data = json.loads(failures.file_path(self.out).read_text(encoding="utf-8"))
+        self.assertEqual([e["id"] for v in data["folders"].values() for e in v], ["bad"])
+        self.assertEqual(list(data["folders"]), ["Chan/videos/music"])
+        self.assertIn("boom", (self.out / ".media-downloader" / "errors.log").read_text(encoding="utf-8"))
+        works = dict(PLAYLIST, items=[{"url": "https://x/bad", "title": "B", "id": "bad"}])
+        with mock.patch.object(downloader, "inspect_media", return_value=works), \
+             mock.patch.object(downloader, "download_one", fake_download_one_ok):
+            self.run_cli("https://p", "-s", "all")
+        data = json.loads(failures.file_path(self.out).read_text(encoding="utf-8"))
+        self.assertEqual(data["folders"], {})
+
+    def test_playlist_file_for_playlists_only(self):
+        mix = dict(PLAYLIST, title="Road Trip", section=["playlists", "Road Trip"])
+        with mock.patch.object(downloader, "inspect_media", return_value=mix):
+            code, text = self.run_cli("https://p", "-s", "1,3")
+        self.assertEqual(code, 0)
+        folder = self.out / "Chan" / "playlists" / "Road Trip" / "music"
+        self.assertIn("Playlist file:", text)
+        lines = (folder / "Road Trip.m3u8").read_text(encoding="utf-8").splitlines()
+        self.assertIn("# 3 items in the playlist, 2 in this folder", lines)
+        self.assertIn("# Not in this folder: B | https://x/b", lines)   # B was not selected
+        self.run_cli("https://p", "-s", "1")  # a channel tab (section 'videos') gets none
+        self.assertEqual(len(list(self.out.rglob("*.m3u8"))), 1)
+
+    def test_mp4_goes_to_the_video_folder(self):
+        self.run_cli("https://p", "-s", "1", "-f", "mp4", "-q", "720")
+        self.assertTrue((self.out / "Chan" / "videos" / "video" / "a [a][720p].mp4").exists())
+        self.assertFalse((self.out / "Chan" / "videos" / "music").exists())
 
     def test_list_downloads_nothing(self):
         code, text = self.run_cli("https://p", "--list")
@@ -103,11 +147,11 @@ class CliTests(unittest.TestCase):
         self.run_cli("https://p", "-s", "1")
         _, text = self.run_cli("https://p", "-s", "1", "-q", "320")
         self.assertIn("you also have: music 192kbps", text)
-        self.assertTrue((self.out / "Chan" / "videos" / "a [a][320kbps].mp3").exists())
+        self.assertTrue((self.out / "Chan" / "videos" / "music" / "a [a][320kbps].mp3").exists())
 
     def test_subtitles_flag(self):
         self.run_cli("https://p", "-s", "1", "-f", "mp4", "-q", "720", "--subs", "en")
-        folder = self.out / "Chan" / "videos"
+        folder = self.out / "Chan" / "videos" / "video"
         self.assertEqual(sorted(p.name for p in folder.iterdir()), ["a [a][720p].en.srt", "a [a][720p].mp4"])
 
     def test_bad_selection(self):

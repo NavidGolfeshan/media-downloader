@@ -21,6 +21,7 @@ from typing import Any
 MEDIA_EXTS = {".mp3", ".mp4", ".mkv", ".webm"}
 TEMP_EXTS = {".part", ".ytdl", ".temp"}
 PARTIAL_DIR = ".partial"  # unfinished downloads wait here (so a re-run can resume)
+DATA_DIR_NAME = ".media-downloader"  # failed.json and errors.log live here, inside the download folder
 KINDS = {"mp3": "music", "mp4": "video"}
 
 _NAME_TAGS = re.compile(r"\[([^\[\]]+)\](?:\[(\d+(?:kbps|p))\])?$")
@@ -32,6 +33,10 @@ def safe_name(value: str, fallback: str = "unknown") -> str:
     return (value or fallback)[:100]
 
 
+def data_dir(root: Path | str) -> Path:
+    return Path(root) / DATA_DIR_NAME
+
+
 def kind_for(mode: str) -> str:
     return KINDS[mode]
 
@@ -40,8 +45,12 @@ def quality_label(mode: str, quality: str) -> str:
     return f"{quality}kbps" if mode == "mp3" else f"{quality}p"
 
 
-def destination(root: Path | str, channel: str, section: list[str]) -> Path:
-    parts = [safe_name(channel)] + [safe_name(part, "videos") for part in section]
+def destination(root: Path | str, channel: str, section: list[str], kind: str) -> Path:
+    """CHANNEL/SECTION/music or CHANNEL/SECTION/video, so the MP3 and MP4 version of the
+    same thing never share a folder (the quality stays in the file name)."""
+    if kind not in KINDS.values():
+        raise ValueError(f"unknown kind: {kind!r}")
+    parts = [safe_name(channel)] + [safe_name(part, "videos") for part in section] + [kind]
     return Path(root).joinpath(*parts)
 
 
@@ -153,4 +162,40 @@ def place(staging: Path, dest: Path, tag: str) -> list[Path]:
         shutil.move(str(path), str(target))
         placed.append(target)
     shutil.rmtree(staging, ignore_errors=True)
+    return placed
+
+
+_SUBTITLE_SUFFIX = re.compile(r"(\.[^.\\/]+\.srt)$", re.IGNORECASE)
+
+
+def video_files(index: dict[str, list[dict[str, Any]]], item_id: str, root: Path | str) -> list[Path]:
+    """Every downloaded video file of an item, from a scan() index."""
+    return [Path(root) / r["rel"] for r in index.get(item_id, []) if r["kind"] == "video"]
+
+
+def subtitle_suffix(name: str, item_id: str | None) -> str:
+    """'.en.srt' from 'Title [id].en.srt'."""
+    if item_id:
+        tag = f"[{item_id}]"
+        position = name.rfind(tag)
+        if position >= 0:
+            return name[position + len(tag):]
+    match = _SUBTITLE_SUFFIX.search(name)
+    return match.group(1) if match else ".srt"
+
+
+def place_subtitles(staging: Path, videos: list[Path], item_id: str | None) -> list[Path]:
+    """Copy freshly downloaded .srt files next to each video, named after it:
+    'Title [id][480p].mp4' gets 'Title [id][480p].en.srt'. An older subtitle with the
+    same name is replaced. Returns the files written; staging is removed."""
+    placed: list[Path] = []
+    try:
+        for sub in sorted(p for p in staging.iterdir() if p.is_file() and p.suffix.lower() == ".srt"):
+            suffix = subtitle_suffix(sub.name, item_id)
+            for video in videos:
+                target = video.with_name(video.stem + suffix)
+                shutil.copyfile(sub, target)
+                placed.append(target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return placed

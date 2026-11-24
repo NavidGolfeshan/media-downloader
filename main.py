@@ -8,12 +8,15 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
 import config
 import downloader
+import errorlog
+import failures
 import library
 import paths
 from config import settings
@@ -70,6 +73,8 @@ def settings_payload() -> dict:
         "max_concurrent_jobs": settings.max_concurrent_jobs,
         "job_ttl_minutes": settings.job_ttl_minutes,
         "max_playlist_items": settings.max_playlist_items,
+        "error_log": str(errorlog.log_path(settings.download_dir).expanduser().resolve()),
+        "failed_file": str(failures.file_path(settings.download_dir).expanduser().resolve()),
     }
 
 
@@ -92,12 +97,15 @@ def api_settings():
 
 @app.post("/api/check")
 def api_check():
-    """Which of these items (by id) are already in the download folder?"""
+    """Which of these items (by id) are already in the download folder, and which failed before?"""
     ids = (request.get_json(silent=True) or {}).get("ids")
     if not isinstance(ids, list):
         return error("ids must be a list.")
     ids = [str(i) for i in ids[:MAX_ITEMS_PER_JOB] if i]
-    return jsonify({"found": library.lookup(settings.download_dir, ids)})
+    return jsonify({
+        "found": library.lookup(settings.download_dir, ids),
+        "failed": failures.lookup(settings.download_dir, ids),
+    })
 
 
 @app.get("/api/library")
@@ -122,9 +130,12 @@ def api_inspect():
         return error("Please enter a valid URL beginning with http:// or https://.")
     hint = str(data.get("channel") or "").strip() or None
     try:
-        return jsonify(downloader.inspect_media(url, hint))
+        result = downloader.inspect_media(url, hint)
+        result["source_url"] = url
+        return jsonify(result)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to inspect URL")
+        errorlog.write(settings.download_dir, "Look-up failed", exc, {"URL": url}, exc)
         return error(
             f"Couldn't inspect that URL: {str(exc)[:700]}\n"
             "Check the URL, update yt-dlp, and verify that you have permission "
@@ -153,6 +164,7 @@ def api_formats():
         info, heights = downloader.inspect_video_formats(url)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Could not inspect video formats")
+        errorlog.write(settings.download_dir, "Format check failed", exc, {"URL": url}, exc)
         return error(f"Couldn't inspect video formats: {str(exc)[:700]}", 502)
     return jsonify({
         "heights": downloader.choose_heights(heights),
@@ -201,6 +213,8 @@ def api_create_job():
         subtitle = {"lang": str(raw_sub["lang"]).strip()[:40], "auto": bool(raw_sub.get("auto"))}
 
     job = get_jobs().create(
+        source_url=str(data.get("source_url") or "")[:2000] or None,
+        playlist_items=clean_playlist(data.get("playlist")),
         title=str(data.get("title") or "download")[:300],
         is_playlist=bool(data.get("is_playlist")),
         items=items,
@@ -209,6 +223,60 @@ def api_create_job():
         channel=str(data.get("channel") or "downloads")[:200],
         section=section[:4],
         subtitle=subtitle,
+    )
+    return jsonify(job.snapshot()), 201
+
+
+def clean_playlist(raw: Any) -> list[dict[str, Any]] | None:
+    """The playlist the page was showing (every item, selected or not), trimmed to what the
+    playlist file needs. Bad entries are skipped: the file is optional."""
+    if not isinstance(raw, list):
+        return None
+    entries = []
+    for entry in raw[:MAX_ITEMS_PER_JOB]:
+        if not isinstance(entry, dict):
+            continue
+        duration = entry.get("duration")
+        entries.append({
+            "id": str(entry.get("id") or "")[:200],
+            "title": str(entry.get("title") or "Untitled")[:300],
+            "url": str(entry.get("url") or "")[:2000],
+            "uploader": str(entry.get("uploader") or "")[:200],
+            "duration": duration if isinstance(duration, int) and duration > 0 else None,
+        })
+    return entries or None
+
+
+@app.post("/api/subtitles")
+def api_create_subtitle_job():
+    """Download only the subtitles of videos that are already in the library."""
+    data = request.get_json(silent=True) or {}
+
+    raw_sub = data.get("subtitle")
+    lang = str(raw_sub.get("lang") or "").strip()[:40] if isinstance(raw_sub, dict) else ""
+    if not lang:
+        return error("Choose a subtitle language.")
+    subtitle = {"lang": lang, "auto": bool(raw_sub.get("auto"))}
+
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return error("Select at least one video.")
+    if len(raw_items) > MAX_ITEMS_PER_JOB:
+        return error(f"Too many items (max {MAX_ITEMS_PER_JOB}).")
+    items = []
+    for raw in raw_items:
+        url = str(raw.get("url", "")).strip() if isinstance(raw, dict) else ""
+        item_id = str(raw.get("id") or "")[:200] if isinstance(raw, dict) else ""
+        if not URL_PATTERN.match(url) or not item_id:
+            return error("Every item needs a valid http(s) URL and an id.")
+        items.append({"url": url, "title": str(raw.get("title") or "Untitled")[:300], "id": item_id})
+
+    job = get_jobs().create_subtitles(
+        title=str(data.get("title") or "subtitles")[:300],
+        items=items,
+        subtitle=subtitle,
+        channel=str(data.get("channel") or "")[:200] or None,
+        source_url=str(data.get("source_url") or "")[:2000] or None,
     )
     return jsonify(job.snapshot()), 201
 
